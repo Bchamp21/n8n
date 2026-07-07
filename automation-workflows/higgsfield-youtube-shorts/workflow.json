@@ -3,8 +3,8 @@
   "nodes": [
     {
       "parameters": {
-        "content": "## Setup checklist\n1. **Anthropic credential** (`anthropicApi`) — API key for script/metadata generation.\n2. **Higgsfield API credential** (`httpHeaderAuth`) — header name `Authorization`, value `Key <KEY_ID>:<KEY_SECRET>`. Verified against the official `higgsfield-ai/higgsfield-js` SDK source: base URL `https://platform.higgsfield.ai`, auth header format `Authorization: Key {apiKey}:{apiSecret}`.\n3. **YouTube OAuth2 credential** (`youTubeOAuth2Api`) scoped to `https://www.googleapis.com/auth/youtube.upload`, for channel https://www.youtube.com/channel/UC110FLC_x-RTU45CKTyWI1g.\n4. **SMTP credential** on the two Email Send nodes (or swap for Slack/Telegram).\n5. **Google Sheets credential + spreadsheet** on \"Log Published Short\" (or remove that node).\n\nHiggsfield has no single text-to-video call — its actual pipeline (confirmed from SDK source) is two jobs: **text-to-image** (`flux-pro/kontext/max/text-to-image`), then **image-to-video** (`/v1/image2video/dop`, the \"DoP\" camera-motion model) using the generated image as input. Both jobs are polled the same way: `GET /requests/{request_id}/status`.\n\nUpload defaults to `privacyStatus: private` so you can review a Short before making it public.",
-        "height": 480,
+        "content": "## Setup checklist\n1. **Anthropic credential** (`anthropicApi`) — API key for script/metadata generation.\n2. **Higgsfield API credential** (`httpHeaderAuth`) — header name `Authorization`, value `Key <KEY_ID>:<KEY_SECRET>`. Verified against the official `higgsfield-ai/higgsfield-js` SDK source, and cross-checked against the `higgsfield-mcp` npm package's client implementation: base URL `https://platform.higgsfield.ai`, auth header format `Authorization: Key {apiKey}:{apiSecret}`. If you get 401s, some endpoints alternatively accept separate `hf-api-key` / `hf-secret` headers — add those too if needed.\n3. **YouTube OAuth2 credential** (`youTubeOAuth2Api`) scoped to `https://www.googleapis.com/auth/youtube.upload`, for channel https://www.youtube.com/channel/UC110FLC_x-RTU45CKTyWI1g.\n4. **SMTP credential** on the two Email Send nodes (or swap for Slack/Telegram).\n5. **Google Sheets credential + spreadsheet** on \"Log Published Short\" (or remove that node).\n\nHiggsfield has no single text-to-video call — its real pipeline is two jobs on its unified \"new API\" (bare model-id path, flat JSON body, no wrapper key): **text-to-image** (`bytedance/seedream/v4/text-to-image`), then **image-to-video** (`higgsfield-ai/dop/standard`) using the generated image as input. Both jobs are polled the same way: `GET /requests/{request_id}/status`.\n\nUpload defaults to `privacyStatus: private` so you can review a Short before making it public.",
+        "height": 500,
         "width": 480
       },
       "id": "sticky-setup",
@@ -65,12 +65,12 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "https://platform.higgsfield.ai/flux-pro/kontext/max/text-to-image",
+        "url": "https://platform.higgsfield.ai/bytedance/seedream/v4/text-to-image",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ input: { prompt: $json.visual_prompt, aspect_ratio: \"9:16\", safety_tolerance: 2 } }) }}",
+        "jsonBody": "={{ JSON.stringify({ prompt: $json.visual_prompt, aspect_ratio: \"9:16\", resolution: \"1080p\" }) }}",
         "options": {}
       },
       "id": "http-create-image-job",
@@ -79,7 +79,7 @@
       "typeVersion": 4.2,
       "position": [580, 0],
       "onError": "continueErrorOutput",
-      "notes": "Endpoint + body shape verified against higgsfield-ai/higgsfield-js README example."
+      "notes": "Endpoint + flat body shape verified against higgsfield-ai/higgsfield-js SDK source and the higgsfield-mcp package's client.js (bytedance/seedream/v4/text-to-image, aspect_ratio enum includes 9:16)."
     },
     {
       "parameters": {
@@ -167,6 +167,12 @@
                     "operator": { "type": "string", "operation": "equals", "name": "filter.operator.equals" }
                   },
                   {
+                    "id": "img-cond-cancelled",
+                    "leftValue": "={{ $json.status }}",
+                    "rightValue": "cancelled",
+                    "operator": { "type": "string", "operation": "equals", "name": "filter.operator.equals" }
+                  },
+                  {
                     "id": "img-cond-timeout",
                     "leftValue": "={{ $json.elapsed_ms }}",
                     "rightValue": 300000,
@@ -191,21 +197,21 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "https://platform.higgsfield.ai/v1/image2video/dop",
+        "url": "https://platform.higgsfield.ai/higgsfield-ai/dop/standard",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ input: { model: \"dop-turbo\", prompt: $('Parse Script JSON').item.json.camera_motion, input_images: [{ type: \"image_url\", image_url: $json.image_url }] } }) }}",
+        "jsonBody": "={{ JSON.stringify({ image_url: $json.image_url, prompt: $('Parse Script JSON').item.json.camera_motion, duration: 10 }) }}",
         "options": {}
       },
       "id": "http-create-video-job",
-      "name": "Create Higgsfield Video Job (DoP)",
+      "name": "Create Higgsfield Video Job (DoP Standard)",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [2020, -160],
       "onError": "continueErrorOutput",
-      "notes": "Endpoint + body shape verified against higgsfield-ai/higgsfield-js README example for image-to-video (model dop-turbo)."
+      "notes": "Uses the new unified-API DoP Standard model (flat body, no motion_id lookup needed) instead of the legacy /v1/image2video/dop endpoint. Verified against the higgsfield-mcp package's generate_video_dop_standard tool (duration accepts 2-10s)."
     },
     {
       "parameters": {
@@ -290,6 +296,12 @@
                     "id": "vid-cond-canceled",
                     "leftValue": "={{ $json.status }}",
                     "rightValue": "canceled",
+                    "operator": { "type": "string", "operation": "equals", "name": "filter.operator.equals" }
+                  },
+                  {
+                    "id": "vid-cond-cancelled",
+                    "leftValue": "={{ $json.status }}",
+                    "rightValue": "cancelled",
                     "operator": { "type": "string", "operation": "equals", "name": "filter.operator.equals" }
                   },
                   {
@@ -436,12 +448,12 @@
     "Evaluate Image Status": { "main": [[{ "node": "Route Image Status", "type": "main", "index": 0 }]] },
     "Route Image Status": {
       "main": [
-        [{ "node": "Create Higgsfield Video Job (DoP)", "type": "main", "index": 0 }],
+        [{ "node": "Create Higgsfield Video Job (DoP Standard)", "type": "main", "index": 0 }],
         [{ "node": "Format Failure Notice", "type": "main", "index": 0 }],
         [{ "node": "Wait Before Image Poll", "type": "main", "index": 0 }]
       ]
     },
-    "Create Higgsfield Video Job (DoP)": {
+    "Create Higgsfield Video Job (DoP Standard)": {
       "main": [
         [{ "node": "Init Video Poll State", "type": "main", "index": 0 }],
         [{ "node": "Format Failure Notice", "type": "main", "index": 0 }]
