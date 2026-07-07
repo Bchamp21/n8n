@@ -3,26 +3,21 @@
   "nodes": [
     {
       "parameters": {
-        "content": "## Setup checklist\n1. **Anthropic credential** (`anthropicApi`) — API key for script/metadata generation.\n2. **Higgsfield API credential** (`httpHeaderAuth`) — header `Authorization` = `Key <KEY_ID>:<KEY_SECRET>`.\n3. **Fill in the Higgsfield model/endpoint path** on the \"Create Higgsfield Job\" node — confirm the exact path and payload shape from your Higgsfield dashboard/docs, this template only encodes the publicly documented shape (`POST /v1/<endpoint>`, poll `GET /v1/requests/{request_id}/status`).\n4. **YouTube OAuth2 credential** (`youTubeOAuth2Api`) scoped to `https://www.googleapis.com/auth/youtube.upload`, for channel https://www.youtube.com/channel/UC110FLC_x-RTU45CKTyWI1g.\n5. **SMTP credential** on the two Email Send nodes (or swap them for Slack/Telegram).\n6. **Google Sheets credential + spreadsheet** on \"Log Published Short\" (or remove that node).\n\nUpload defaults to `privacyStatus: private` so you can review a Short before making it public — flip it to `public` once you trust the pipeline.",
-        "height": 420,
-        "width": 460
+        "content": "## Setup checklist\n1. **Anthropic credential** (`anthropicApi`) — API key for script/metadata generation.\n2. **Higgsfield API credential** (`httpHeaderAuth`) — header name `Authorization`, value `Key <KEY_ID>:<KEY_SECRET>`. Verified against the official `higgsfield-ai/higgsfield-js` SDK source: base URL `https://platform.higgsfield.ai`, auth header format `Authorization: Key {apiKey}:{apiSecret}`.\n3. **YouTube OAuth2 credential** (`youTubeOAuth2Api`) scoped to `https://www.googleapis.com/auth/youtube.upload`, for channel https://www.youtube.com/channel/UC110FLC_x-RTU45CKTyWI1g.\n4. **SMTP credential** on the two Email Send nodes (or swap for Slack/Telegram).\n5. **Google Sheets credential + spreadsheet** on \"Log Published Short\" (or remove that node).\n\nHiggsfield has no single text-to-video call — its actual pipeline (confirmed from SDK source) is two jobs: **text-to-image** (`flux-pro/kontext/max/text-to-image`), then **image-to-video** (`/v1/image2video/dop`, the \"DoP\" camera-motion model) using the generated image as input. Both jobs are polled the same way: `GET /requests/{request_id}/status`.\n\nUpload defaults to `privacyStatus: private` so you can review a Short before making it public.",
+        "height": 480,
+        "width": 480
       },
       "id": "sticky-setup",
       "name": "Setup Notes",
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
-      "position": [-360, -260]
+      "position": [-360, -320]
     },
     {
       "parameters": {
         "rule": {
           "interval": [
-            {
-              "field": "days",
-              "daysInterval": 1,
-              "triggerAtHour": 9,
-              "triggerAtMinute": 0
-            }
+            { "field": "days", "daysInterval": 1, "triggerAtHour": 9, "triggerAtMinute": 0 }
           ]
         }
       },
@@ -47,7 +42,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "{\n  \"model\": \"claude-sonnet-5-20250929\",\n  \"max_tokens\": 1024,\n  \"system\": \"You are a short-form video scriptwriter. Reply with ONLY a JSON object (no prose, no markdown fences) matching this schema: {\\\"title\\\": string (<=90 chars, must include #Shorts), \\\"description\\\": string, \\\"tags\\\": string (comma separated keywords), \\\"script\\\": string (15-40 words of spoken narration), \\\"visual_prompt\\\": string (a vivid single-scene description for an AI video generator, vertical 9:16 framing, under 60 seconds)}.\",\n  \"messages\": [\n    { \"role\": \"user\", \"content\": \"Generate a new, original YouTube Shorts concept (facts, motivation, storytelling, etc). Avoid repeating common cliches.\" }\n  ]\n}",
+        "jsonBody": "{\n  \"model\": \"claude-sonnet-5-20250929\",\n  \"max_tokens\": 1024,\n  \"system\": \"You are a short-form video scriptwriter. Reply with ONLY a JSON object (no prose, no markdown fences) matching this schema: {\\\"title\\\": string (<=90 chars, must include #Shorts), \\\"description\\\": string, \\\"tags\\\": string (comma separated keywords), \\\"script\\\": string (15-40 words of spoken narration), \\\"visual_prompt\\\": string (a vivid single still-image scene description for an AI image generator, vertical 9:16 framing), \\\"camera_motion\\\": string (a short camera-movement direction for animating that still image, e.g. 'slow dolly in, subtle parallax')}.\",\n  \"messages\": [\n    { \"role\": \"user\", \"content\": \"Generate a new, original YouTube Shorts concept (facts, motivation, storytelling, etc). Avoid repeating common cliches.\" }\n  ]\n}",
         "options": {}
       },
       "id": "http-generate-script",
@@ -70,39 +65,36 @@
     {
       "parameters": {
         "method": "POST",
-        "url": "https://platform.higgsfield.ai/v1/REPLACE_WITH_TEXT_TO_VIDEO_ENDPOINT",
+        "url": "https://platform.higgsfield.ai/flux-pro/kontext/max/text-to-image",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ input: { prompt: $json.visual_prompt, aspect_ratio: \"9:16\", duration: 10 } }) }}",
+        "jsonBody": "={{ JSON.stringify({ input: { prompt: $json.visual_prompt, aspect_ratio: \"9:16\", safety_tolerance: 2 } }) }}",
         "options": {}
       },
-      "id": "http-create-job",
-      "name": "Create Higgsfield Job",
+      "id": "http-create-image-job",
+      "name": "Create Higgsfield Image Job",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [580, 0],
       "onError": "continueErrorOutput",
-      "notes": "Confirm the real endpoint path, auth header, and body shape from Higgsfield's current docs/dashboard before running."
+      "notes": "Endpoint + body shape verified against higgsfield-ai/higgsfield-js README example."
     },
     {
       "parameters": {
-        "jsCode": "const job = $input.first().json;\nconst requestId = job.request_id ?? job.generation_id;\nif (!requestId) {\n  throw new Error('Higgsfield job creation response had no request_id/generation_id: ' + JSON.stringify(job));\n}\n\nreturn [{ json: { request_id: requestId, started_at: Date.now() } }];"
+        "jsCode": "const job = $input.first().json;\nif (!job.request_id) {\n  throw new Error('Higgsfield image job response had no request_id: ' + JSON.stringify(job));\n}\n\nreturn [{ json: { request_id: job.request_id, started_at: Date.now() } }];"
       },
-      "id": "code-init-poll",
-      "name": "Init Poll State",
+      "id": "code-init-image-poll",
+      "name": "Init Image Poll State",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [820, 0]
     },
     {
-      "parameters": {
-        "amount": 15,
-        "unit": "seconds"
-      },
-      "id": "wait-poll",
-      "name": "Wait Before Polling",
+      "parameters": { "amount": 10, "unit": "seconds" },
+      "id": "wait-image-poll",
+      "name": "Wait Before Image Poll",
       "type": "n8n-nodes-base.wait",
       "typeVersion": 1.1,
       "position": [1060, 0]
@@ -110,13 +102,13 @@
     {
       "parameters": {
         "method": "GET",
-        "url": "={{ \"https://platform.higgsfield.ai/v1/requests/\" + $('Init Poll State').item.json.request_id + \"/status\" }}",
+        "url": "={{ \"https://platform.higgsfield.ai/requests/\" + $('Init Image Poll State').item.json.request_id + \"/status\" }}",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "options": {}
       },
-      "id": "http-check-status",
-      "name": "Check Higgsfield Status",
+      "id": "http-check-image-status",
+      "name": "Check Higgsfield Image Status",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [1300, 0],
@@ -124,10 +116,10 @@
     },
     {
       "parameters": {
-        "jsCode": "const res = $input.first().json;\nconst startedAt = $('Init Poll State').item.json.started_at;\n\nreturn [{\n  json: {\n    status: res.status,\n    result_url: res.results?.raw?.url ?? res.result_url ?? null,\n    elapsed_ms: Date.now() - startedAt,\n  },\n}];"
+        "jsCode": "const res = $input.first().json;\nconst startedAt = $('Init Image Poll State').item.json.started_at;\n\nreturn [{\n  json: {\n    status: res.status,\n    image_url: res.images?.[0]?.url ?? null,\n    elapsed_ms: Date.now() - startedAt,\n  },\n}];"
       },
-      "id": "code-evaluate-status",
-      "name": "Evaluate Status",
+      "id": "code-evaluate-image-status",
+      "name": "Evaluate Image Status",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
       "position": [1540, 0]
@@ -141,7 +133,7 @@
                 "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
                 "conditions": [
                   {
-                    "id": "cond-completed",
+                    "id": "img-cond-completed",
                     "leftValue": "={{ $json.status }}",
                     "rightValue": "completed",
                     "operator": { "type": "string", "operation": "equals", "name": "filter.operator.equals" }
@@ -157,19 +149,151 @@
                 "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
                 "conditions": [
                   {
-                    "id": "cond-failed",
+                    "id": "img-cond-failed",
                     "leftValue": "={{ $json.status }}",
                     "rightValue": "failed",
                     "operator": { "type": "string", "operation": "equals", "name": "filter.operator.equals" }
                   },
                   {
-                    "id": "cond-nsfw",
+                    "id": "img-cond-nsfw",
                     "leftValue": "={{ $json.status }}",
                     "rightValue": "nsfw",
                     "operator": { "type": "string", "operation": "equals", "name": "filter.operator.equals" }
                   },
                   {
-                    "id": "cond-timeout",
+                    "id": "img-cond-canceled",
+                    "leftValue": "={{ $json.status }}",
+                    "rightValue": "canceled",
+                    "operator": { "type": "string", "operation": "equals", "name": "filter.operator.equals" }
+                  },
+                  {
+                    "id": "img-cond-timeout",
+                    "leftValue": "={{ $json.elapsed_ms }}",
+                    "rightValue": 300000,
+                    "operator": { "type": "number", "operation": "gt", "name": "filter.operator.gt" }
+                  }
+                ],
+                "combinator": "or"
+              },
+              "renameOutput": true,
+              "outputKey": "Failed or Timed Out"
+            }
+          ]
+        },
+        "options": { "fallbackOutput": "extra" }
+      },
+      "id": "switch-route-image-status",
+      "name": "Route Image Status",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [1780, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://platform.higgsfield.ai/v1/image2video/dop",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ input: { model: \"dop-turbo\", prompt: $('Parse Script JSON').item.json.camera_motion, input_images: [{ type: \"image_url\", image_url: $json.image_url }] } }) }}",
+        "options": {}
+      },
+      "id": "http-create-video-job",
+      "name": "Create Higgsfield Video Job (DoP)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2020, -160],
+      "onError": "continueErrorOutput",
+      "notes": "Endpoint + body shape verified against higgsfield-ai/higgsfield-js README example for image-to-video (model dop-turbo)."
+    },
+    {
+      "parameters": {
+        "jsCode": "const job = $input.first().json;\nif (!job.request_id) {\n  throw new Error('Higgsfield video job response had no request_id: ' + JSON.stringify(job));\n}\n\nreturn [{ json: { request_id: job.request_id, started_at: Date.now() } }];"
+      },
+      "id": "code-init-video-poll",
+      "name": "Init Video Poll State",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2260, -160]
+    },
+    {
+      "parameters": { "amount": 15, "unit": "seconds" },
+      "id": "wait-video-poll",
+      "name": "Wait Before Video Poll",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [2500, -160]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ \"https://platform.higgsfield.ai/requests/\" + $('Init Video Poll State').item.json.request_id + \"/status\" }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "http-check-video-status",
+      "name": "Check Higgsfield Video Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2740, -160],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const res = $input.first().json;\nconst startedAt = $('Init Video Poll State').item.json.started_at;\n\nreturn [{\n  json: {\n    status: res.status,\n    video_url: res.video?.url ?? null,\n    elapsed_ms: Date.now() - startedAt,\n  },\n}];"
+      },
+      "id": "code-evaluate-video-status",
+      "name": "Evaluate Video Status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2980, -160]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+                "conditions": [
+                  {
+                    "id": "vid-cond-completed",
+                    "leftValue": "={{ $json.status }}",
+                    "rightValue": "completed",
+                    "operator": { "type": "string", "operation": "equals", "name": "filter.operator.equals" }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Completed"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+                "conditions": [
+                  {
+                    "id": "vid-cond-failed",
+                    "leftValue": "={{ $json.status }}",
+                    "rightValue": "failed",
+                    "operator": { "type": "string", "operation": "equals", "name": "filter.operator.equals" }
+                  },
+                  {
+                    "id": "vid-cond-nsfw",
+                    "leftValue": "={{ $json.status }}",
+                    "rightValue": "nsfw",
+                    "operator": { "type": "string", "operation": "equals", "name": "filter.operator.equals" }
+                  },
+                  {
+                    "id": "vid-cond-canceled",
+                    "leftValue": "={{ $json.status }}",
+                    "rightValue": "canceled",
+                    "operator": { "type": "string", "operation": "equals", "name": "filter.operator.equals" }
+                  },
+                  {
+                    "id": "vid-cond-timeout",
                     "leftValue": "={{ $json.elapsed_ms }}",
                     "rightValue": 600000,
                     "operator": { "type": "number", "operation": "gt", "name": "filter.operator.gt" }
@@ -184,27 +308,25 @@
         },
         "options": { "fallbackOutput": "extra" }
       },
-      "id": "switch-route-status",
-      "name": "Route by Status",
+      "id": "switch-route-video-status",
+      "name": "Route Video Status",
       "type": "n8n-nodes-base.switch",
       "typeVersion": 3,
-      "position": [1780, 0]
+      "position": [3220, -160]
     },
     {
       "parameters": {
         "method": "GET",
-        "url": "={{ $json.result_url }}",
+        "url": "={{ $json.video_url }}",
         "options": {
-          "response": {
-            "response": { "responseFormat": "file", "outputPropertyName": "data" }
-          }
+          "response": { "response": { "responseFormat": "file", "outputPropertyName": "data" } }
         }
       },
       "id": "http-download-video",
       "name": "Download Video",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [2020, -160],
+      "position": [3460, -320],
       "onError": "continueErrorOutput"
     },
     {
@@ -226,9 +348,9 @@
       "name": "Upload Short to YouTube",
       "type": "n8n-nodes-base.youTube",
       "typeVersion": 1,
-      "position": [2260, -160],
+      "position": [3700, -320],
       "onError": "continueErrorOutput",
-      "notes": "Confirm categoryId (24 = Entertainment) and privacyStatus for this channel: https://www.youtube.com/channel/UC110FLC_x-RTU45CKTyWI1g"
+      "notes": "Confirm categoryId (24 = Entertainment) and privacyStatus for channel https://www.youtube.com/channel/UC110FLC_x-RTU45CKTyWI1g"
     },
     {
       "parameters": {
@@ -249,7 +371,7 @@
       "name": "Log Published Short",
       "type": "n8n-nodes-base.googleSheets",
       "typeVersion": 4.6,
-      "position": [2500, -260]
+      "position": [3940, -420]
     },
     {
       "parameters": {
@@ -262,7 +384,7 @@
       "name": "Notify Success",
       "type": "n8n-nodes-base.emailSend",
       "typeVersion": 2.1,
-      "position": [2740, -260]
+      "position": [4180, -420]
     },
     {
       "parameters": {
@@ -272,7 +394,7 @@
       "name": "Format Failure Notice",
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
-      "position": [2020, 200]
+      "position": [2020, 260]
     },
     {
       "parameters": {
@@ -285,7 +407,7 @@
       "name": "Notify Failure",
       "type": "n8n-nodes-base.emailSend",
       "typeVersion": 2.1,
-      "position": [2260, 200]
+      "position": [2260, 260]
     }
   ],
   "connections": {
@@ -296,27 +418,49 @@
         [{ "node": "Format Failure Notice", "type": "main", "index": 0 }]
       ]
     },
-    "Parse Script JSON": { "main": [[{ "node": "Create Higgsfield Job", "type": "main", "index": 0 }]] },
-    "Create Higgsfield Job": {
+    "Parse Script JSON": { "main": [[{ "node": "Create Higgsfield Image Job", "type": "main", "index": 0 }]] },
+    "Create Higgsfield Image Job": {
       "main": [
-        [{ "node": "Init Poll State", "type": "main", "index": 0 }],
+        [{ "node": "Init Image Poll State", "type": "main", "index": 0 }],
         [{ "node": "Format Failure Notice", "type": "main", "index": 0 }]
       ]
     },
-    "Init Poll State": { "main": [[{ "node": "Wait Before Polling", "type": "main", "index": 0 }]] },
-    "Wait Before Polling": { "main": [[{ "node": "Check Higgsfield Status", "type": "main", "index": 0 }]] },
-    "Check Higgsfield Status": {
+    "Init Image Poll State": { "main": [[{ "node": "Wait Before Image Poll", "type": "main", "index": 0 }]] },
+    "Wait Before Image Poll": { "main": [[{ "node": "Check Higgsfield Image Status", "type": "main", "index": 0 }]] },
+    "Check Higgsfield Image Status": {
       "main": [
-        [{ "node": "Evaluate Status", "type": "main", "index": 0 }],
+        [{ "node": "Evaluate Image Status", "type": "main", "index": 0 }],
         [{ "node": "Format Failure Notice", "type": "main", "index": 0 }]
       ]
     },
-    "Evaluate Status": { "main": [[{ "node": "Route by Status", "type": "main", "index": 0 }]] },
-    "Route by Status": {
+    "Evaluate Image Status": { "main": [[{ "node": "Route Image Status", "type": "main", "index": 0 }]] },
+    "Route Image Status": {
+      "main": [
+        [{ "node": "Create Higgsfield Video Job (DoP)", "type": "main", "index": 0 }],
+        [{ "node": "Format Failure Notice", "type": "main", "index": 0 }],
+        [{ "node": "Wait Before Image Poll", "type": "main", "index": 0 }]
+      ]
+    },
+    "Create Higgsfield Video Job (DoP)": {
+      "main": [
+        [{ "node": "Init Video Poll State", "type": "main", "index": 0 }],
+        [{ "node": "Format Failure Notice", "type": "main", "index": 0 }]
+      ]
+    },
+    "Init Video Poll State": { "main": [[{ "node": "Wait Before Video Poll", "type": "main", "index": 0 }]] },
+    "Wait Before Video Poll": { "main": [[{ "node": "Check Higgsfield Video Status", "type": "main", "index": 0 }]] },
+    "Check Higgsfield Video Status": {
+      "main": [
+        [{ "node": "Evaluate Video Status", "type": "main", "index": 0 }],
+        [{ "node": "Format Failure Notice", "type": "main", "index": 0 }]
+      ]
+    },
+    "Evaluate Video Status": { "main": [[{ "node": "Route Video Status", "type": "main", "index": 0 }]] },
+    "Route Video Status": {
       "main": [
         [{ "node": "Download Video", "type": "main", "index": 0 }],
         [{ "node": "Format Failure Notice", "type": "main", "index": 0 }],
-        [{ "node": "Wait Before Polling", "type": "main", "index": 0 }]
+        [{ "node": "Wait Before Video Poll", "type": "main", "index": 0 }]
       ]
     },
     "Download Video": {
