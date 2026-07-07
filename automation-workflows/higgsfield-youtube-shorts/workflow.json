@@ -1,0 +1,341 @@
+{
+  "name": "Higgsfield → YouTube Shorts Auto-Publisher",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Setup checklist\n1. **Anthropic credential** (`anthropicApi`) — API key for script/metadata generation.\n2. **Higgsfield API credential** (`httpHeaderAuth`) — header `Authorization` = `Key <KEY_ID>:<KEY_SECRET>`.\n3. **Fill in the Higgsfield model/endpoint path** on the \"Create Higgsfield Job\" node — confirm the exact path and payload shape from your Higgsfield dashboard/docs, this template only encodes the publicly documented shape (`POST /v1/<endpoint>`, poll `GET /v1/requests/{request_id}/status`).\n4. **YouTube OAuth2 credential** (`youTubeOAuth2Api`) scoped to `https://www.googleapis.com/auth/youtube.upload`, for channel https://www.youtube.com/channel/UC110FLC_x-RTU45CKTyWI1g.\n5. **SMTP credential** on the two Email Send nodes (or swap them for Slack/Telegram).\n6. **Google Sheets credential + spreadsheet** on \"Log Published Short\" (or remove that node).\n\nUpload defaults to `privacyStatus: private` so you can review a Short before making it public — flip it to `public` once you trust the pipeline.",
+        "height": 420,
+        "width": 460
+      },
+      "id": "sticky-setup",
+      "name": "Setup Notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-360, -260]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "daysInterval": 1,
+              "triggerAtHour": 9,
+              "triggerAtMinute": 0
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Daily Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-140, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "anthropicApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "anthropic-version", "value": "2023-06-01" },
+            { "name": "content-type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"model\": \"claude-sonnet-5-20250929\",\n  \"max_tokens\": 1024,\n  \"system\": \"You are a short-form video scriptwriter. Reply with ONLY a JSON object (no prose, no markdown fences) matching this schema: {\\\"title\\\": string (<=90 chars, must include #Shorts), \\\"description\\\": string, \\\"tags\\\": string (comma separated keywords), \\\"script\\\": string (15-40 words of spoken narration), \\\"visual_prompt\\\": string (a vivid single-scene description for an AI video generator, vertical 9:16 framing, under 60 seconds)}.\",\n  \"messages\": [\n    { \"role\": \"user\", \"content\": \"Generate a new, original YouTube Shorts concept (facts, motivation, storytelling, etc). Avoid repeating common cliches.\" }\n  ]\n}",
+        "options": {}
+      },
+      "id": "http-generate-script",
+      "name": "Generate Script & Metadata (Claude)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [100, 0],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const raw = $input.first().json;\nconst text = raw.content?.[0]?.text;\nif (!text) {\n  throw new Error('Anthropic response had no text content: ' + JSON.stringify(raw));\n}\n\nconst match = text.match(/\\{[\\s\\S]*\\}/);\nlet parsed;\ntry {\n  parsed = JSON.parse(match ? match[0] : text);\n} catch (error) {\n  throw new Error(`Could not parse script JSON from Claude response: ${error.message}`);\n}\n\nreturn [{ json: parsed }];"
+      },
+      "id": "code-parse-script",
+      "name": "Parse Script JSON",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [340, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://platform.higgsfield.ai/v1/REPLACE_WITH_TEXT_TO_VIDEO_ENDPOINT",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ input: { prompt: $json.visual_prompt, aspect_ratio: \"9:16\", duration: 10 } }) }}",
+        "options": {}
+      },
+      "id": "http-create-job",
+      "name": "Create Higgsfield Job",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [580, 0],
+      "onError": "continueErrorOutput",
+      "notes": "Confirm the real endpoint path, auth header, and body shape from Higgsfield's current docs/dashboard before running."
+    },
+    {
+      "parameters": {
+        "jsCode": "const job = $input.first().json;\nconst requestId = job.request_id ?? job.generation_id;\nif (!requestId) {\n  throw new Error('Higgsfield job creation response had no request_id/generation_id: ' + JSON.stringify(job));\n}\n\nreturn [{ json: { request_id: requestId, started_at: Date.now() } }];"
+      },
+      "id": "code-init-poll",
+      "name": "Init Poll State",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [820, 0]
+    },
+    {
+      "parameters": {
+        "amount": 15,
+        "unit": "seconds"
+      },
+      "id": "wait-poll",
+      "name": "Wait Before Polling",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [1060, 0]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ \"https://platform.higgsfield.ai/v1/requests/\" + $('Init Poll State').item.json.request_id + \"/status\" }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "http-check-status",
+      "name": "Check Higgsfield Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1300, 0],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const res = $input.first().json;\nconst startedAt = $('Init Poll State').item.json.started_at;\n\nreturn [{\n  json: {\n    status: res.status,\n    result_url: res.results?.raw?.url ?? res.result_url ?? null,\n    elapsed_ms: Date.now() - startedAt,\n  },\n}];"
+      },
+      "id": "code-evaluate-status",
+      "name": "Evaluate Status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1540, 0]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+                "conditions": [
+                  {
+                    "id": "cond-completed",
+                    "leftValue": "={{ $json.status }}",
+                    "rightValue": "completed",
+                    "operator": { "type": "string", "operation": "equals", "name": "filter.operator.equals" }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "Completed"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+                "conditions": [
+                  {
+                    "id": "cond-failed",
+                    "leftValue": "={{ $json.status }}",
+                    "rightValue": "failed",
+                    "operator": { "type": "string", "operation": "equals", "name": "filter.operator.equals" }
+                  },
+                  {
+                    "id": "cond-nsfw",
+                    "leftValue": "={{ $json.status }}",
+                    "rightValue": "nsfw",
+                    "operator": { "type": "string", "operation": "equals", "name": "filter.operator.equals" }
+                  },
+                  {
+                    "id": "cond-timeout",
+                    "leftValue": "={{ $json.elapsed_ms }}",
+                    "rightValue": 600000,
+                    "operator": { "type": "number", "operation": "gt", "name": "filter.operator.gt" }
+                  }
+                ],
+                "combinator": "or"
+              },
+              "renameOutput": true,
+              "outputKey": "Failed or Timed Out"
+            }
+          ]
+        },
+        "options": { "fallbackOutput": "extra" }
+      },
+      "id": "switch-route-status",
+      "name": "Route by Status",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [1780, 0]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.result_url }}",
+        "options": {
+          "response": {
+            "response": { "responseFormat": "file", "outputPropertyName": "data" }
+          }
+        }
+      },
+      "id": "http-download-video",
+      "name": "Download Video",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2020, -160],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "resource": "video",
+        "operation": "upload",
+        "title": "={{ $('Parse Script JSON').item.json.title }}",
+        "categoryId": "24",
+        "binaryProperty": "data",
+        "options": {
+          "description": "={{ $('Parse Script JSON').item.json.description + \"\\n\\n#Shorts\" }}",
+          "tags": "={{ $('Parse Script JSON').item.json.tags }}",
+          "privacyStatus": "private",
+          "notifySubscribers": true,
+          "selfDeclaredMadeForKids": false
+        }
+      },
+      "id": "youtube-upload",
+      "name": "Upload Short to YouTube",
+      "type": "n8n-nodes-base.youTube",
+      "typeVersion": 1,
+      "position": [2260, -160],
+      "onError": "continueErrorOutput",
+      "notes": "Confirm categoryId (24 = Entertainment) and privacyStatus for this channel: https://www.youtube.com/channel/UC110FLC_x-RTU45CKTyWI1g"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": { "__rl": true, "mode": "list", "value": "REPLACE_WITH_SPREADSHEET_ID" },
+        "sheetName": { "__rl": true, "mode": "list", "value": "REPLACE_WITH_SHEET_NAME" },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "videoId": "={{ $json.id }}",
+            "title": "={{ $('Parse Script JSON').item.json.title }}",
+            "url": "={{ \"https://youtu.be/\" + $json.id }}",
+            "publishedAt": "={{ $now.toISO() }}"
+          }
+        }
+      },
+      "id": "sheets-log",
+      "name": "Log Published Short",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.6,
+      "position": [2500, -260]
+    },
+    {
+      "parameters": {
+        "fromEmail": "REPLACE_WITH_SENDER_EMAIL",
+        "toEmail": "bchamp248@gmail.com",
+        "subject": "✅ New YouTube Short published",
+        "text": "={{ \"Published: \" + $('Parse Script JSON').item.json.title + \"\\nhttps://youtu.be/\" + $json.id }}"
+      },
+      "id": "email-success",
+      "name": "Notify Success",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [2740, -260]
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\nreturn [{\n  json: {\n    message: `Higgsfield/YouTube Shorts pipeline failed.\\nStatus: ${item.status ?? 'unknown'}\\nDetails: ${JSON.stringify(item)}`,\n  },\n}];"
+      },
+      "id": "code-format-failure",
+      "name": "Format Failure Notice",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2020, 200]
+    },
+    {
+      "parameters": {
+        "fromEmail": "REPLACE_WITH_SENDER_EMAIL",
+        "toEmail": "bchamp248@gmail.com",
+        "subject": "⚠️ YouTube Shorts pipeline failed",
+        "text": "={{ $json.message }}"
+      },
+      "id": "email-failure",
+      "name": "Notify Failure",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [2260, 200]
+    }
+  ],
+  "connections": {
+    "Daily Trigger": { "main": [[{ "node": "Generate Script & Metadata (Claude)", "type": "main", "index": 0 }]] },
+    "Generate Script & Metadata (Claude)": {
+      "main": [
+        [{ "node": "Parse Script JSON", "type": "main", "index": 0 }],
+        [{ "node": "Format Failure Notice", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parse Script JSON": { "main": [[{ "node": "Create Higgsfield Job", "type": "main", "index": 0 }]] },
+    "Create Higgsfield Job": {
+      "main": [
+        [{ "node": "Init Poll State", "type": "main", "index": 0 }],
+        [{ "node": "Format Failure Notice", "type": "main", "index": 0 }]
+      ]
+    },
+    "Init Poll State": { "main": [[{ "node": "Wait Before Polling", "type": "main", "index": 0 }]] },
+    "Wait Before Polling": { "main": [[{ "node": "Check Higgsfield Status", "type": "main", "index": 0 }]] },
+    "Check Higgsfield Status": {
+      "main": [
+        [{ "node": "Evaluate Status", "type": "main", "index": 0 }],
+        [{ "node": "Format Failure Notice", "type": "main", "index": 0 }]
+      ]
+    },
+    "Evaluate Status": { "main": [[{ "node": "Route by Status", "type": "main", "index": 0 }]] },
+    "Route by Status": {
+      "main": [
+        [{ "node": "Download Video", "type": "main", "index": 0 }],
+        [{ "node": "Format Failure Notice", "type": "main", "index": 0 }],
+        [{ "node": "Wait Before Polling", "type": "main", "index": 0 }]
+      ]
+    },
+    "Download Video": {
+      "main": [
+        [{ "node": "Upload Short to YouTube", "type": "main", "index": 0 }],
+        [{ "node": "Format Failure Notice", "type": "main", "index": 0 }]
+      ]
+    },
+    "Upload Short to YouTube": {
+      "main": [
+        [{ "node": "Log Published Short", "type": "main", "index": 0 }],
+        [{ "node": "Format Failure Notice", "type": "main", "index": 0 }]
+      ]
+    },
+    "Log Published Short": { "main": [[{ "node": "Notify Success", "type": "main", "index": 0 }]] },
+    "Format Failure Notice": { "main": [[{ "node": "Notify Failure", "type": "main", "index": 0 }]] }
+  },
+  "pinData": {},
+  "meta": {
+    "instanceId": "higgsfield-youtube-shorts-template"
+  }
+}
